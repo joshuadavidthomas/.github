@@ -1,0 +1,62 @@
+name: mirror-freshness
+
+# Fork mirrors of upstream projects are kept level by a single external bot
+# (pull[bot]), which opens a sync pull request whenever a parent's default
+# branch moves. Nothing watches that bot, so a mirror that cannot fast-forward
+# stays stale in silence -- joshuadavidthomas/hiwave sat conflicted for eight
+# months. This workflow fails within a day instead, and records what it found.
+
+on:
+  schedule:
+    # Four times a day. Mirrors that are syncing normally merge seconds after
+    # their pull request opens, so anything still out of sync hours later is stuck.
+    - cron: "17 1,7,13,19 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: mirror-freshness
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Audit fork mirrors
+        id: audit
+        # A stall opens or updates the tracking issue; the step also fails so the
+        # run is red in the Actions tab.
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/mirror_freshness.py --report reports/mirror-freshness.md --sync-issue
+
+      # Committing the report is also what keeps this schedule alive: GitHub
+      # disables scheduled workflows after 60 days without repository activity.
+      - name: Commit the report
+        if: always()
+        run: |
+          if [ ! -f reports/mirror-freshness.md ]; then
+            echo "no report was written; nothing to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add reports/mirror-freshness.md
+          if git diff --cached --quiet; then
+            echo "report unchanged"
+          else
+            git commit -m "chore: mirror freshness report"
+            git push
+          fi
+
+      - name: Fail when a mirror is stalled
+        if: steps.audit.outcome == 'failure'
+        run: |
+          echo "::error::Fork mirrors have stopped syncing with upstream; see reports/mirror-freshness.md and the tracking issue."
+          exit 1
