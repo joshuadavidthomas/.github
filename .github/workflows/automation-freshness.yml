@@ -1,0 +1,70 @@
+name: automation-freshness
+
+# Automation here stops in two ways that leave no signal: GitHub disables a
+# workflow after 60 days of repository inactivity, and a bot's pull-request runs
+# park in action_required when nobody approves them. Neither is visible, so a
+# schedule quietly disappears and a release pull request merges with no checks.
+# This workflow reports both twice a day, commits the report, and fails while a
+# stall stands, so the run is red in the Actions tab and visible to the workspace.
+#
+# It reads public repository data with the workflow's own token, covering the
+# public half of the installation; a repository it cannot read is listed in the
+# report rather than passed over silently.
+
+on:
+  schedule:
+    - cron: "23 1,13 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: automation-freshness
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Audit workflows and approval stalls
+        id: audit
+        # A stall fails the step so the run is red; the report is written either way.
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/automation_freshness.py --report reports/automation-freshness.md
+
+      # Committing the report is also what keeps this schedule alive: GitHub
+      # disables scheduled workflows after 60 days without repository activity.
+      - name: Commit the report
+        if: always()
+        run: |
+          if [ ! -f reports/automation-freshness.md ]; then
+            echo "no report was written; nothing to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add reports/automation-freshness.md
+          if git diff --cached --quiet; then
+            echo "report unchanged"
+          else
+            git commit -m "chore: automation freshness report"
+            git push
+          fi
+
+      - name: Show the report
+        if: always()
+        run: |
+          if [ -f reports/automation-freshness.md ]; then
+            cat reports/automation-freshness.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Fail when automation has stopped
+        if: steps.audit.outcome == 'failure'
+        run: |
+          echo "::error::Automation has stopped; see reports/automation-freshness.md."
+          exit 1
